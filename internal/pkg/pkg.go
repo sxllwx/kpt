@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -364,7 +365,7 @@ func (p *Pkg) RelativePathTo(ancestorPkg *Pkg) (string, error) {
 func (p *Pkg) DirectSubpackages() ([]*Pkg, error) {
 	var subPkgs []*Pkg
 
-	packagePaths, err := Subpackages(p.fsys, p.UniquePath.String(), All, false)
+	packagePaths, err := Subpackages(&resolvedSymbolicLinks{p.fsys}, p.UniquePath.String(), All, false)
 	if err != nil {
 		return subPkgs, err
 	}
@@ -520,6 +521,32 @@ func IsPackageUnfetched(path string) (bool, error) {
 	return kf.Upstream != nil && kf.UpstreamLock == nil, nil
 }
 
+type resolvedSymbolicLinks struct {
+	filesys.FileSystem
+}
+
+func (f *resolvedSymbolicLinks) Walk(path string, walkFn filepath.WalkFunc) error {
+	return f.FileSystem.Walk(path, func(path string, info fs.FileInfo, err error) error {
+		if info.Mode().Type() == os.ModeSymlink {
+			path, err = filepath.EvalSymlinks(path)
+			if err != nil {
+				return err
+			}
+			info, err = os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				if err := f.FileSystem.Walk(path, walkFn); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+		return walkFn(path, info, err)
+	})
+}
+
 // LocalResources returns resources that belong to this package excluding the subpackage resources.
 func (p *Pkg) LocalResources() (resources []*yaml.RNode, err error) {
 	const op errors.Op = "pkg.readResources"
@@ -544,7 +571,9 @@ func (p *Pkg) LocalResources() (resources []*yaml.RNode, err error) {
 		},
 		WrapBareSeqNode: true,
 		FileSystem: filesys.FileSystemOrOnDisk{
-			FileSystem: p.fsys,
+			FileSystem: &resolvedSymbolicLinks{
+				FileSystem: p.fsys,
+			},
 		},
 	}
 	resources, err = pkgReader.Read()

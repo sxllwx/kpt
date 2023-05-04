@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -316,6 +317,11 @@ func hydrate(ctx context.Context, pn *pkgNode, hctx *hydrationContext) (output [
 		return nil, err
 	}
 
+	err = fixOutPackagePath(hctx.root.pkg.UniquePath.String(), currPkgResources)
+	if err != nil {
+		return nil, err
+	}
+
 	// include current package's resources in the input resource list
 	input = append(input, currPkgResources...)
 
@@ -329,6 +335,50 @@ func hydrate(ctx context.Context, pn *pkgNode, hctx *hydrationContext) (output [
 	curr.resources = output
 
 	return output, err
+}
+
+func fixOutPackagePath(rootPackage string, input []*yaml.RNode) error {
+	_, err := kioutil.Map(input, func(node *yaml.RNode) (*yaml.RNode, error) {
+
+		annotations := node.GetAnnotations()
+		var filePath string
+		if v, ok := annotations[kioutil.PathAnnotation]; ok {
+			filePath = v
+		}
+		if v, ok := annotations[kioutil.LegacyPathAnnotation]; ok {
+			filePath = v
+		}
+
+		pkgPathAnnotation := "internal.config.kubernetes.io/package-path"
+		packagePath := annotations[pkgPathAnnotation]
+		if packagePath != rootPackage {
+			annotations[pkgPathAnnotation] = filepath.Join(rootPackage, packagePath)
+		}
+		if filepath.Dir(filePath) == "." {
+			err := node.SetAnnotations(annotations)
+			return node, err
+		}
+
+		var dirList []string
+		base := filepath.Dir(filepath.Clean(filePath))
+		for {
+			if base == "." {
+				break
+			}
+			if strings.HasSuffix(base, "..") {
+				// reach end of related path
+				break
+			}
+			dirList = append(dirList, filepath.Base(base))
+			base = filepath.Dir(base)
+		}
+		fileName := filepath.Base(filePath)
+		annotations[kioutil.PathAnnotation] = path.Join("out", strings.Join(append(dirList, fileName), "-"))
+		annotations[kioutil.LegacyPathAnnotation] = path.Join("out", strings.Join(append(dirList, fileName), "-"))
+		err := node.SetAnnotations(annotations)
+		return node, err
+	})
+	return err
 }
 
 // runPipeline runs the pipeline defined at current pkgNode on given input resources.
